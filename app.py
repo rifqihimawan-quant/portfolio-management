@@ -138,6 +138,7 @@ def init_state():
         "last_idr_fetch":   0,
         "price_error":  None,
         "idr_error":    None,
+        "editing_book": None,        # name of book currently being edited
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -532,8 +533,109 @@ def build_sidebar():
             if idr_data.get("error"):
                 st.caption(f"⚠ {idr_data['error']}")
 
-        # ── Add Trading Book ────────────────────────────────────────────
-        sh("Add / Edit Trading Book")
+        # ── Trading Books — clickable list with inline edit ──────────────
+        sh("Trading Books")
+
+        books = st.session_state["books"]
+        prices = st.session_state.get("prices", {"BTC":0,"ETH":0,"USDT":1})
+        editing = st.session_state.get("editing_book")
+
+        if not books:
+            st.markdown(
+                '<div style="font-size:11px;color:#475569;padding:8px 0;">'
+                'No books yet — add one below.</div>',
+                unsafe_allow_html=True)
+
+        for bname, pos in list(books.items()):
+            bval = sum(amt * prices.get(a, 0) for a, amt in pos.items())
+            is_editing = (editing == bname)
+
+            # ── Book header row with Edit / Delete buttons ───────────────
+            left, mid, right = st.columns([5, 1, 1])
+            with left:
+                summary = " · ".join(
+                    f'{a} {v:,.4g}' for a, v in pos.items() if v > 0
+                ) or "empty"
+                st.markdown(
+                    f'<div style="padding:4px 0;">'
+                    f'<div style="font-size:12px;font-weight:600;color:#f1f5f9;">{bname}</div>'
+                    f'<div style="font-size:10px;color:#475569;">{summary}</div>'
+                    f'<div style="font-size:10px;color:#3b82f6;">${bval:,.2f}</div>'
+                    f'</div>', unsafe_allow_html=True)
+
+            with mid:
+                if st.button("✏️", key=f"edit_{bname}",
+                             help=f"Edit {bname}", use_container_width=True):
+                    if editing == bname:
+                        st.session_state["editing_book"] = None  # toggle off
+                    else:
+                        # Pre-fill editor state
+                        st.session_state["editing_book"] = bname
+                        st.session_state[f"edit_usdt_{bname}"] = pos.get("USDT", 0.0)
+                        st.session_state[f"edit_btc_{bname}"]  = pos.get("BTC",  0.0)
+                        st.session_state[f"edit_eth_{bname}"]  = pos.get("ETH",  0.0)
+                    st.rerun()
+
+            with right:
+                if st.button("🗑", key=f"del_{bname}",
+                             help=f"Delete {bname}", use_container_width=True):
+                    del st.session_state["books"][bname]
+                    if st.session_state.get("editing_book") == bname:
+                        st.session_state["editing_book"] = None
+                    st.rerun()
+
+            # ── Inline editor — expands under the book when ✏️ clicked ──
+            if is_editing:
+                with st.container():
+                    st.markdown(
+                        f'<div style="background:#1e2535;border:1px solid #3b82f6;'
+                        f'border-radius:8px;padding:12px;margin:4px 0 10px 0;">'
+                        f'<div style="font-size:10px;color:#3b82f6;font-weight:600;'
+                        f'margin-bottom:8px;letter-spacing:.05em;">EDITING: {bname}</div></div>',
+                        unsafe_allow_html=True)
+
+                    ec1, ec2 = st.columns(2)
+                    with ec1:
+                        new_usdt = st.number_input(
+                            "USDT", min_value=0.0,
+                            value=float(st.session_state.get(f"edit_usdt_{bname}", pos.get("USDT",0))),
+                            step=100.0, format="%.2f",
+                            key=f"einp_usdt_{bname}")
+                        new_btc = st.number_input(
+                            "BTC", min_value=0.0,
+                            value=float(st.session_state.get(f"edit_btc_{bname}", pos.get("BTC",0))),
+                            step=0.001, format="%.4f",
+                            key=f"einp_btc_{bname}")
+                    with ec2:
+                        new_eth = st.number_input(
+                            "ETH", min_value=0.0,
+                            value=float(st.session_state.get(f"edit_eth_{bname}", pos.get("ETH",0))),
+                            step=0.01, format="%.4f",
+                            key=f"einp_eth_{bname}")
+
+                    sa, sc = st.columns(2)
+                    with sa:
+                        if st.button("💾 Save", key=f"save_{bname}",
+                                     use_container_width=True):
+                            st.session_state["books"][bname] = {
+                                "USDT": new_usdt,
+                                "BTC":  new_btc,
+                                "ETH":  new_eth,
+                            }
+                            st.session_state["editing_book"] = None
+                            st.rerun()
+                    with sc:
+                        if st.button("✕ Cancel", key=f"cancel_{bname}",
+                                     use_container_width=True):
+                            st.session_state["editing_book"] = None
+                            st.rerun()
+
+            st.markdown(
+                '<div style="border-bottom:1px solid #1e2535;margin:2px 0 6px;"></div>',
+                unsafe_allow_html=True)
+
+        # ── Add New Book ────────────────────────────────────────────────
+        sh("Add New Book")
         book_name = st.text_input("Book name", placeholder="e.g. Prop Book 1",
                                    key="inp_book_name")
         c1, c2 = st.columns(2)
@@ -546,36 +648,21 @@ def build_sidebar():
             eth_amt  = st.number_input("ETH",  min_value=0.0, value=0.0,
                                         step=0.01, format="%.4f", key="inp_eth")
 
-        col_add, col_clr = st.columns(2)
-        with col_add:
-            add_clicked = st.button("➕ Save Book", use_container_width=True,
-                                     key="btn_add_book")
-        with col_clr:
-            clr_clicked = st.button("🗑 Remove", use_container_width=True,
-                                     key="btn_remove_book")
-
-        if add_clicked and book_name.strip():
-            st.session_state["books"][book_name.strip()] = {
-                "USDT": usdt_amt,
-                "BTC":  btc_amt,
-                "ETH":  eth_amt,
-            }
-            st.success(f"✓ Saved: {book_name.strip()}")
-
-        if clr_clicked and book_name.strip():
-            if book_name.strip() in st.session_state["books"]:
-                del st.session_state["books"][book_name.strip()]
-                st.warning(f"Removed: {book_name.strip()}")
-
-        # ── Existing books quick view ───────────────────────────────────
-        if st.session_state["books"]:
-            sh("Current Books")
-            for bname, pos in st.session_state["books"].items():
-                st.markdown(
-                    f'<div style="font-size:11px;color:#94a3b8;margin-bottom:3px;">'
-                    f'<b style="color:#f1f5f9;">{bname}</b><br>'
-                    + " · ".join(f'{a}: {v:,.4g}' for a,v in pos.items() if v>0)
-                    + '</div>', unsafe_allow_html=True)
+        if st.button("➕ Add Book", use_container_width=True, key="btn_add_book"):
+            name = book_name.strip()
+            if name:
+                if name in st.session_state["books"]:
+                    st.warning(f"'{name}' already exists — use ✏️ to edit it.")
+                else:
+                    st.session_state["books"][name] = {
+                        "USDT": usdt_amt,
+                        "BTC":  btc_amt,
+                        "ETH":  eth_amt,
+                    }
+                    st.success(f"✓ Added: {name}")
+                    st.rerun()
+            else:
+                st.error("Enter a book name first.")
 
         sh("History")
         hist_len = st.slider("Keep last N snapshots", 10, 500, 100, 10)
