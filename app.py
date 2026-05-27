@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -36,22 +36,47 @@ st.set_page_config(
 # ─────────────────────────────────────────────────────────────────────────────
 DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio_data.json")
 
-def load_persistent() -> dict:
-    """Read saved books from disk. Returns empty dict on any error."""
+def load_persistent() -> tuple:
+    """
+    Read books + history from disk.
+    Returns (books_dict, history_list) — both empty on any error.
+    History entries older than 7 days are pruned on load.
+    """
     try:
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, "r") as f:
                 data = json.load(f)
-                return data.get("books", {})
+            books = data.get("books", {})
+            raw_hist = data.get("history", [])
+            # Prune snapshots older than 7 days to keep file size sane
+            cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
+            history = [h for h in raw_hist if h.get("ts", "") >= cutoff]
+            return books, history
     except Exception:
         pass
-    return {}
+    return {}, []
 
-def save_persistent(books: dict):
-    """Write books to disk immediately."""
+def save_persistent(books: dict, history: list = None):
+    """
+    Write books (and optionally history) to disk immediately.
+    If history is None, preserves whatever history is already on disk.
+    """
     try:
+        # Read existing data so we don't wipe history when saving only books
+        existing = {}
+        if os.path.exists(DATA_FILE):
+            try:
+                with open(DATA_FILE, "r") as f:
+                    existing = json.load(f)
+            except Exception:
+                pass
+        payload = {
+            "books":    books,
+            "history":  history if history is not None else existing.get("history", []),
+            "saved_at": datetime.utcnow().isoformat(),
+        }
         with open(DATA_FILE, "w") as f:
-            json.dump({"books": books, "saved_at": datetime.utcnow().isoformat()}, f)
+            json.dump(payload, f)
     except Exception as e:
         st.warning(f"⚠ Could not save to disk: {e}")
 
@@ -157,8 +182,10 @@ CHART_STYLE = dict(
 # ─────────────────────────────────────────────────────────────────────────────
 def init_state():
     if "books_loaded" not in st.session_state:
-        # Load from disk on first run
-        st.session_state["books"]       = load_persistent()
+        # Load books AND history from disk on first run (browser refresh safe)
+        books, history = load_persistent()
+        st.session_state["books"]       = books
+        st.session_state["history"]     = history
         st.session_state["books_loaded"]= True
     defaults = {
         "history":      [],
@@ -538,6 +565,7 @@ def build_sidebar():
         hist_len = st.slider("Keep last N snapshots", 10, 500, 100, 10)
         if st.button("🗑 Clear History", use_container_width=True):
             st.session_state["history"] = []
+            save_persistent(st.session_state["books"], [])   # wipe history on disk too
 
         return refresh, hist_len
 
@@ -578,6 +606,9 @@ def main():
         if len(hist) > hist_len:
             hist = hist[-hist_len:]
         st.session_state["history"] = hist
+        # Persist history to disk every 5 snapshots to avoid excessive writes
+        if len(hist) % 5 == 0 or len(hist) <= 2:
+            save_persistent(st.session_state["books"], hist)
     else:
         tot  = 0.0
         bvals = {}
