@@ -183,7 +183,8 @@ def fetch_prices() -> dict:
             "error":    None,
         }
     except Exception as cg_err:
-        pass
+        # Save to plain variable — Python 3 deletes 'as' vars after except block
+        _cg_err_msg = str(cg_err)[:60]
 
     # ── Fallback: Binance public ticker ───────────────────────────────────
     try:
@@ -204,6 +205,7 @@ def fetch_prices() -> dict:
             "error": None,
         }
     except Exception as bn_err:
+        _bn_err_msg = str(bn_err)[:60]
         return {
             "BTC": st.session_state["prices"].get("BTC", 95000),
             "ETH": st.session_state["prices"].get("ETH", 3500),
@@ -211,7 +213,7 @@ def fetch_prices() -> dict:
             "BTC_chg": 0.0, "ETH_chg": 0.0, "USDT_chg": 0.0,
             "source": "cached",
             "ts": "—",
-            "error": f"CoinGecko: {str(cg_err)[:60]} | Binance: {str(bn_err)[:60]}",
+            "error": f"CoinGecko: {_cg_err_msg} | Binance: {_bn_err_msg}",
         }
 
 # ─────────────────────────────────────────────────────────────────────────────
