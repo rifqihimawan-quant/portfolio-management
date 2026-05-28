@@ -375,14 +375,20 @@ def chart_portfolio(history, show_idr, idr_rate, books):
     y_min = max(0, total_vals.min() * 0.97)
     y_max = total_vals.max() * 1.03
 
-    fig.update_layout(**CHART_STYLE,
+    # Merge yaxis override into a local copy so there's no duplicate keyword
+    portfolio_layout = {
+        **CHART_STYLE,
+        "yaxis": dict(
+            range=[y_min, y_max],
+            gridcolor="#f0f2f8", linecolor="#e3e8f0",
+            tickfont=dict(size=10, color="#aab0c0"),
+            tickformat=",.0f",
+        ),
+    }
+    fig.update_layout(**portfolio_layout,
         title=dict(text="Portfolio Value — All Books Combined",
                    font=dict(size=14, color="#1a1f36", weight=700), x=0),
-        yaxis_title=f"Value ({unit})", height=300, yaxis_tickformat=",.0f",
-        yaxis=dict(range=[y_min, y_max],
-                   gridcolor="#f0f2f8", linecolor="#e3e8f0",
-                   tickfont=dict(size=10, color="#aab0c0"),
-                   tickformat=",.0f"),
+        yaxis_title=f"Value ({unit})", height=300,
     )
     return fig
 
