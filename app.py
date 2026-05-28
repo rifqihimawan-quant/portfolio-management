@@ -370,10 +370,19 @@ def chart_portfolio(history, show_idr, idr_rate, books):
         except Exception:
             pass
 
+    # Y-axis range derived from Total line only (not per-book sub-lines)
+    total_vals = df["total_usd"] * mul
+    y_min = max(0, total_vals.min() * 0.97)
+    y_max = total_vals.max() * 1.03
+
     fig.update_layout(**CHART_STYLE,
         title=dict(text="Portfolio Value — All Books Combined",
                    font=dict(size=14, color="#1a1f36", weight=700), x=0),
         yaxis_title=f"Value ({unit})", height=300, yaxis_tickformat=",.0f",
+        yaxis=dict(range=[y_min, y_max],
+                   gridcolor="#f0f2f8", linecolor="#e3e8f0",
+                   tickfont=dict(size=10, color="#aab0c0"),
+                   tickformat=",.0f"),
     )
     return fig
 
@@ -422,9 +431,11 @@ def chart_allocation(books, prices):
     ))
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=10, r=10, t=30, b=10), height=270,
-        title=dict(text="Allocation", font=dict(size=13, color="#1a1f36"), x=0),
-        legend=dict(font=dict(size=10, color="#8898aa"), bgcolor="rgba(0,0,0,0)"),
+        margin=dict(l=10, r=10, t=36, b=10), height=320,
+        title=dict(text="Allocation by Book & Asset",
+                   font=dict(size=13, color="#1a1f36"), x=0),
+        legend=dict(font=dict(size=11, color="#8898aa"), bgcolor="rgba(0,0,0,0)",
+                    orientation="h", yanchor="bottom", y=-0.22, x=0.5, xanchor="center"),
     )
     return fig
 
@@ -764,60 +775,85 @@ def main():
         unsafe_allow_html=True)
 
     # ═══════════════════════════════════════════════════════════════════════
-    # 3. CHARTS (prominent, at the top)
+    # 3. CHARTS — stacked: portfolio value | drawdown | allocation pie
     # ═══════════════════════════════════════════════════════════════════════
     st.markdown('<p class="sec-head">Portfolio Charts</p>', unsafe_allow_html=True)
-    chart_cols = st.columns([3, 1])
-    with chart_cols[0]:
-        fig = chart_portfolio(hist_data, show_idr, idr_rate, books)
-        if fig:
-            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-        else:
-            st.info("Chart appears after 2+ price snapshots (~2 min).", icon="📈")
-        fig_dd = chart_drawdown(hist_data)
-        if fig_dd:
-            st.plotly_chart(fig_dd, use_container_width=True, config={"displayModeBar": False})
-    with chart_cols[1]:
-        fig_alloc = chart_allocation(books, prices)
-        if fig_alloc:
-            st.plotly_chart(fig_alloc, use_container_width=True, config={"displayModeBar": False})
+
+    # Row 1: Portfolio value (full width)
+    fig = chart_portfolio(hist_data, show_idr, idr_rate, books)
+    if fig:
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    else:
+        st.info("Chart appears after 2+ price snapshots (~2 min).", icon="📈")
+
+    # Row 2: Drawdown (full width)
+    fig_dd = chart_drawdown(hist_data)
+    if fig_dd:
+        st.plotly_chart(fig_dd, use_container_width=True, config={"displayModeBar": False})
+
+    # Row 3: Allocation pie (full width, below)
+    fig_alloc = chart_allocation(books, prices)
+    if fig_alloc:
+        st.plotly_chart(fig_alloc, use_container_width=True, config={"displayModeBar": False})
 
     # ═══════════════════════════════════════════════════════════════════════
     # 4. TRADING BOOKS TABLE  (CoinGecko coin-list style)
     # ═══════════════════════════════════════════════════════════════════════
     st.markdown('<p class="sec-head">Trading Books</p>', unsafe_allow_html=True)
 
+    # Asset colours & bar chart constants
     asset_colors = {"BTC": "#f7931a", "ETH": "#627eea", "USDT": "#26a17b"}
+    BAR_W, BAR_H = 180, 22    # total bar width (px) and height
+
     rows_html = ""
     for rank, (bname, pos) in enumerate(books.items(), 1):
         bval    = book_value(pos, prices)
         pct_tot = bval / tot * 100 if tot else 0
         pct_cls = "up" if bval > 0 else "muted"
 
-        # Asset breakdown mini-badges
-        asset_badges = "".join(
-            f'<span class="asset-dot" style="background:{asset_colors.get(a,"#aaa")};"></span>'
-            f'<span style="font-size:11px;color:#1a1f36;margin-right:8px;">'
-            f'{a} {v:,.4g}</span>'
-            for a, v in pos.items() if v > 0
-        )
+        # ── Inline stacked bar chart for Holdings column ──────────────────
+        # Each asset segment width is proportional to its USD share of THIS book
+        if bval > 0:
+            segments = [
+                (a, amt, amt * prices.get(a, 0))
+                for a, amt in pos.items()
+                if amt > 0 and prices.get(a, 0) > 0
+            ]
+            bar_segs = ""
+            label_parts = []
+            for a, amt, usd in segments:
+                seg_w = usd / bval * BAR_W
+                col   = asset_colors.get(a, "#aaa")
+                title = f"{a}: {amt:,.6g} (${usd:,.2f})"
+                bar_segs += (
+                    f'<div title="{title}" style="display:inline-block;'
+                    f'width:{seg_w:.1f}px;height:{BAR_H}px;background:{col};'
+                    f'vertical-align:middle;cursor:default;"></div>'
+                )
+                label_parts.append(
+                    f'<span style="display:inline-flex;align-items:center;gap:3px;'
+                    f'margin-right:10px;font-size:10px;color:#4a5568;">'
+                    f'<span style="width:8px;height:8px;border-radius:2px;'
+                    f'background:{col};display:inline-block;flex-shrink:0;"></span>'
+                    f'{a} <b>{amt:,.4g}</b></span>'
+                )
+            holding_cell = (
+                f'<div style="border-radius:5px;overflow:hidden;height:{BAR_H}px;'
+                f'width:{BAR_W}px;background:#edf0f7;display:flex;">'
+                f'{bar_segs}</div>'
+                f'<div style="display:flex;flex-wrap:wrap;gap:0;margin-top:5px;">'
+                f'{"".join(label_parts)}</div>'
+            )
+        else:
+            holding_cell = '<span style="color:#aab0c0;font-size:11px;">empty</span>'
 
-        # Bars for allocation
-        bar_w = min(100, pct_tot)
         rows_html += f"""
         <tr>
           <td style="color:#aab0c0;font-size:12px;width:32px;">{rank}</td>
-          <td>
-            <span class="book-tag">{bname[:12]}</span>
-          </td>
-          <td>{asset_badges or '<span style="color:#aab0c0;font-size:11px;">empty</span>'}</td>
+          <td><span class="book-tag">{bname[:16]}</span></td>
+          <td style="min-width:220px;">{holding_cell}</td>
           <td class="right" style="font-weight:700;">{fv(bval)}</td>
           <td class="right {pct_cls}">{pct_tot:.1f}%</td>
-          <td style="min-width:120px;">
-            <div style="background:#edf0f7;border-radius:4px;height:6px;width:100%;">
-              <div style="background:#3b5af5;border-radius:4px;height:6px;width:{bar_w:.0f}%;"></div>
-            </div>
-          </td>
         </tr>"""
 
     st.markdown(f"""
@@ -829,7 +865,6 @@ def main():
           <th>Holdings</th>
           <th class="right">Value ({unit})</th>
           <th class="right">% of Portfolio</th>
-          <th>Allocation Bar</th>
         </tr>
       </thead>
       <tbody>{rows_html}</tbody>
