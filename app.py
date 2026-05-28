@@ -537,29 +537,78 @@ def build_sidebar():
             st.markdown('<div style="border-bottom:1px solid #edf0f7;margin:3px 0 7px;"></div>',
                         unsafe_allow_html=True)
 
-        # Add new book
-        sh("Add New Book")
-        new_name = st.text_input("Book name", placeholder="e.g. Prop Desk", key="inp_bname")
-        c1, c2 = st.columns(2)
-        with c1:
-            n_usdt = st.number_input("USDT", min_value=0.0, value=0.0,
-                                      step=100.0, format="%.2f", key="inp_usdt")
-            n_btc  = st.number_input("BTC",  min_value=0.0, value=0.0,
-                                      step=0.001, format="%.4f", key="inp_btc")
-        with c2:
-            n_eth  = st.number_input("ETH",  min_value=0.0, value=0.0,
-                                      step=0.01, format="%.4f", key="inp_eth")
-        if st.button("➕ Add Book", use_container_width=True, key="btn_add"):
-            nm = new_name.strip()
-            if nm:
-                if nm in st.session_state["books"]:
+        # ── Add New Book — single button, expands inline, resets on save ───
+        # Track whether the add-form is open and a version key for resetting
+        if "add_form_open" not in st.session_state:
+            st.session_state["add_form_open"] = False
+        if "add_form_ver" not in st.session_state:
+            st.session_state["add_form_ver"] = 0
+
+        st.markdown(
+            '<div style="border-top:1px solid #e3e8f0;margin:10px 0 8px;"></div>',
+            unsafe_allow_html=True)
+
+        # Single toggle button
+        btn_label = "✕ Cancel" if st.session_state["add_form_open"] else "＋ Add New Book"
+        if st.button(btn_label, use_container_width=True, key="btn_toggle_add"):
+            st.session_state["add_form_open"] = not st.session_state["add_form_open"]
+            st.rerun()
+
+        if st.session_state["add_form_open"]:
+            ver = st.session_state["add_form_ver"]   # bump this to reset all fields
+
+            st.markdown(
+                '<div style="background:#f7f8fc;border:1px solid #dde3ed;border-radius:8px;'
+                'padding:12px;margin-top:6px;">',
+                unsafe_allow_html=True)
+
+            new_name = st.text_input(
+                "Book name",
+                placeholder="e.g. Prop Desk",
+                key=f"inp_bname_{ver}",
+            )
+
+            # Text inputs for amounts — shows empty with grayed placeholder
+            # Parse to float ourselves so we control the UX completely
+            def parse_amount(raw: str, default: float = 0.0) -> float:
+                try:
+                    v = float(raw.replace(",", ".").strip())
+                    return max(0.0, v)
+                except (ValueError, AttributeError):
+                    return default
+
+            c1, c2 = st.columns(2)
+            with c1:
+                raw_usdt = st.text_input(
+                    "USDT", placeholder="0.00000000",
+                    key=f"inp_usdt_{ver}")
+                raw_btc  = st.text_input(
+                    "BTC",  placeholder="0.00000000",
+                    key=f"inp_btc_{ver}")
+            with c2:
+                raw_eth  = st.text_input(
+                    "ETH",  placeholder="0.00000000",
+                    key=f"inp_eth_{ver}")
+
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            if st.button("💾 Save Book", use_container_width=True, key=f"btn_save_new_{ver}"):
+                nm = new_name.strip()
+                if not nm:
+                    st.error("Enter a book name.")
+                elif nm in st.session_state["books"]:
                     st.warning("Already exists — use ✏️ to edit.")
                 else:
-                    st.session_state["books"][nm] = {"USDT": n_usdt, "BTC": n_btc, "ETH": n_eth}
-                    save_persistent(st.session_state["books"])   # ← persist to disk
+                    st.session_state["books"][nm] = {
+                        "USDT": parse_amount(raw_usdt),
+                        "BTC":  parse_amount(raw_btc),
+                        "ETH":  parse_amount(raw_eth),
+                    }
+                    save_persistent(st.session_state["books"])
+                    # Reset: close form and bump version so all keys are fresh
+                    st.session_state["add_form_open"] = False
+                    st.session_state["add_form_ver"]  = ver + 1
                     st.rerun()
-            else:
-                st.error("Enter a name.")
 
         sh("History")
         hist_len = st.slider("Keep last N snapshots", 10, 500, 100, 10)
