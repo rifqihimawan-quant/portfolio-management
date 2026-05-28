@@ -298,6 +298,13 @@ def total_usd(books: dict, prices: dict) -> float:
     return sum(book_value(p, prices) for p in books.values())
 
 def calc_metrics(history: list) -> dict:
+    """
+    Compute full suite of portfolio metrics across 3 categories:
+      Performance: cumulative return, CAGR, max profit, best/worst snapshot
+      Risk:        Sharpe, Sortino, Calmar, Omega, VaR 95, CVaR 95,
+                   max drawdown, current drawdown, volatility, Ulcer Index
+      Benchmark:   vs BTC-hold, vs crypto hedge fund avg (Sharpe 1.6, vol 46%)
+    """
     if len(history) < 2:
         return {}
     vals = np.array([h["total_usd"] for h in history], dtype=float)
@@ -305,35 +312,88 @@ def calc_metrics(history: list) -> dict:
     rets = rets[np.isfinite(rets)]
     if not len(rets):
         return {}
-    peak      = np.maximum.accumulate(vals)
-    dd        = (vals - peak) / np.where(peak != 0, peak, 1)
-    max_dd    = float(dd.min())
-    cur_dd    = float(dd[-1])
-    tot_ret   = (vals[-1] - vals[0]) / vals[0] if vals[0] else 0
-    max_prof  = (np.max(vals) - vals[0]) / vals[0] if vals[0] else 0
-    mu, std   = float(np.mean(rets)), float(np.std(rets, ddof=1)) if len(rets)>1 else 0
-    sharpe    = mu / std * np.sqrt(288) if std else 0
-    neg       = rets[rets < 0]
-    dstd      = float(np.std(neg, ddof=1)) if len(neg)>1 else 0
-    sortino   = mu / dstd * np.sqrt(288) if dstd else 0
-    calmar    = tot_ret / abs(max_dd) if abs(max_dd) > 1e-6 else 0
-    vol_ann   = std * np.sqrt(288) * 100
 
+    ANN = 288   # ~5-min snapshots per day
+
+    # ── Returns ──────────────────────────────────────────────────────────
+    tot_ret  = (vals[-1] - vals[0]) / vals[0] if vals[0] else 0
+    max_prof = (np.max(vals) - vals[0]) / vals[0] if vals[0] else 0
+    n_days   = len(vals) / ANN
+    cagr     = ((vals[-1] / vals[0]) ** (365 / max(n_days, 0.01)) - 1) if vals[0] else 0
+    best_snap  = float(np.max(rets)) * 100
+    worst_snap = float(np.min(rets)) * 100
+
+    # ── Volatility & risk-adjusted ────────────────────────────────────────
+    mu  = float(np.mean(rets))
+    std = float(np.std(rets, ddof=1)) if len(rets) > 1 else 0
+    vol_ann = std * np.sqrt(ANN) * 100
+    sharpe  = mu / std * np.sqrt(ANN) if std else 0
+
+    neg   = rets[rets < 0]
+    dstd  = float(np.std(neg, ddof=1)) if len(neg) > 1 else 0
+    sortino = mu / dstd * np.sqrt(ANN) if dstd else 0
+
+    # Omega ratio (threshold = 0)
+    gains  = np.sum(rets[rets > 0])
+    losses = np.abs(np.sum(rets[rets < 0]))
+    omega  = gains / losses if losses > 1e-10 else float("inf")
+
+    # ── Drawdown ─────────────────────────────────────────────────────────
+    peak    = np.maximum.accumulate(vals)
+    dd      = (vals - peak) / np.where(peak != 0, peak, 1)
+    max_dd  = float(dd.min())
+    cur_dd  = float(dd[-1])
+    calmar  = tot_ret / abs(max_dd) if abs(max_dd) > 1e-6 else 0
+
+    # Ulcer Index = RMS of drawdown series
+    ulcer = float(np.sqrt(np.mean(dd ** 2))) * 100
+
+    # Longest drawdown (consecutive snapshots below peak)
+    in_dd, longest, cur_len = False, 0, 0
+    for d in dd:
+        if d < -0.001:
+            cur_len += 1; in_dd = True
+        else:
+            if in_dd: longest = max(longest, cur_len)
+            cur_len = 0; in_dd = False
+    longest = max(longest, cur_len)
+    longest_dd_hrs = round(longest / 12, 1)   # approx hours (12 × 5-min = 1hr)
+
+    # ── VaR / CVaR at 95% ────────────────────────────────────────────────
+    var95  = float(np.percentile(rets, 5)) * 100   # 5th percentile
+    cvar95 = float(np.mean(rets[rets <= np.percentile(rets, 5)])) * 100 if len(rets) >= 20 else var95
+
+    # Recovery factor = total_ret / |max_dd|
+    recovery = abs(tot_ret / max_dd) if abs(max_dd) > 1e-6 else 0
+
+    # ── Risk signal ───────────────────────────────────────────────────────
     score = 0
     score += 1 if sharpe > 1.5   else (-1 if sharpe < 0.3 else 0)
     score += 1 if max_dd > -0.10 else (-1 if max_dd < -0.25 else 0)
     score += 1 if cur_dd > -0.05 else (-1 if cur_dd < -0.15 else 0)
     score += 1 if vol_ann < 30   else (-1 if vol_ann > 60 else 0)
     score += 1 if tot_ret > 0    else -1
+    score += 1 if omega > 1.5    else (-1 if omega < 0.8 else 0)
 
     if   score >= 3:  sig = ("RISK-ON",  "risk-on",  "🟢")
     elif score <= -2: sig = ("RISK-OFF", "risk-off", "🔴")
     else:             sig = ("NEUTRAL",  "risk-neutral", "🟡")
 
-    return dict(total_ret=tot_ret*100, max_profit=max_prof*100,
-                max_drawdown=max_dd*100, current_dd=cur_dd*100,
-                sharpe=sharpe, sortino=sortino, calmar=calmar,
-                volatility=vol_ann, signal=sig, score=score)
+    return dict(
+        # Performance
+        total_ret=tot_ret*100, max_profit=max_prof*100,
+        cagr=cagr*100, best_snap=best_snap, worst_snap=worst_snap,
+        # Risk — volatility
+        sharpe=sharpe, sortino=sortino, omega=omega, calmar=calmar,
+        recovery=recovery, volatility=vol_ann,
+        # Risk — drawdown
+        max_drawdown=max_dd*100, current_dd=cur_dd*100,
+        ulcer=ulcer, longest_dd_hrs=longest_dd_hrs,
+        # Risk — loss
+        var95=var95, cvar95=cvar95,
+        # Meta
+        signal=sig, score=score,
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CHARTS
@@ -878,7 +938,7 @@ def main():
     """, unsafe_allow_html=True)
 
     # ═══════════════════════════════════════════════════════════════════════
-    # 5. PORTFOLIO METRICS
+    # 5. PORTFOLIO METRICS — 3 categories with benchmarks
     # ═══════════════════════════════════════════════════════════════════════
     st.markdown('<p class="sec-head" style="margin-top:22px;">Portfolio Metrics</p>',
                 unsafe_allow_html=True)
@@ -886,39 +946,296 @@ def main():
     if not metrics:
         st.info("Accumulating data — metrics appear after 2+ snapshots (~2 min).", icon="⏳")
     else:
-        # Risk signal pill
+        # ── Risk signal banner ────────────────────────────────────────────
         sl, sc, se = metrics["signal"]
         st.markdown(
-            f'<div style="display:flex;align-items:center;gap:14px;margin-bottom:14px;">'
+            f'<div style="display:flex;align-items:center;gap:14px;margin-bottom:18px;'
+            f'background:#f7f8fc;border:1px solid #e3e8f0;border-radius:10px;padding:12px 18px;">'
             f'<div class="risk-badge {sc}">{se} {sl}</div>'
-            f'<div style="font-size:12px;color:#8898aa;">Score {metrics["score"]:+d}/5 · '
-            f'Based on Sharpe, drawdown, current DD, volatility, return</div>'
-            f'</div>', unsafe_allow_html=True)
+            f'<div style="font-size:12px;color:#8898aa;">'
+            f'Score {metrics["score"]:+d}/6 · Sharpe · Drawdown · Volatility · Return · Omega'
+            f'</div></div>', unsafe_allow_html=True)
 
-        def mc(label, val, sub, color="#1a1f36"):
-            return (f'<div class="mbox">'
-                    f'<div class="mbox-label">{label}</div>'
-                    f'<div class="mbox-val" style="color:{color};">{val}</div>'
-                    f'<div class="mbox-sub">{sub}</div>'
-                    f'</div>')
+        # ── Helper: metric table row ──────────────────────────────────────
+        def mrow(label, your_val, ideal, benchmark, bm_source, note, val_color):
+            return f"""
+            <tr>
+              <td style="padding:10px 14px;font-size:12px;font-weight:600;color:#1a1f36;
+                         border-bottom:1px solid #edf0f7;min-width:160px;">{label}</td>
+              <td style="padding:10px 14px;font-size:15px;font-weight:800;color:{val_color};
+                         border-bottom:1px solid #edf0f7;font-family:'JetBrains Mono',monospace;
+                         text-align:right;">{your_val}</td>
+              <td style="padding:10px 14px;font-size:12px;color:#0ecb81;font-weight:600;
+                         border-bottom:1px solid #edf0f7;text-align:center;">{ideal}</td>
+              <td style="padding:10px 14px;font-size:12px;color:#3b5af5;font-weight:500;
+                         border-bottom:1px solid #edf0f7;text-align:center;">{benchmark}</td>
+              <td style="padding:10px 14px;font-size:11px;color:#8898aa;
+                         border-bottom:1px solid #edf0f7;">{bm_source}</td>
+              <td style="padding:10px 14px;font-size:11px;color:#aab0c0;
+                         border-bottom:1px solid #edf0f7;">{note}</td>
+            </tr>"""
 
-        dd_c  = "#f6465d" if metrics["max_drawdown"]<-20 else ("#d97706" if metrics["max_drawdown"]<-10 else "#0ecb81")
-        sh_c  = "#0ecb81" if metrics["sharpe"]>1 else ("#d97706" if metrics["sharpe"]>0 else "#f6465d")
-        rt_c  = "#0ecb81" if metrics["total_ret"]>=0 else "#f6465d"
-        vl_c  = "#f6465d" if metrics["volatility"]>60 else ("#d97706" if metrics["volatility"]>30 else "#0ecb81")
+        def mtable(rows_html):
+            return f"""
+            <table style="width:100%;border-collapse:collapse;background:#fff;
+                          border:1px solid #e3e8f0;border-radius:10px;overflow:hidden;">
+              <thead>
+                <tr style="background:#f7f8fc;">
+                  <th style="padding:9px 14px;font-size:10px;font-weight:700;color:#8898aa;
+                             letter-spacing:.08em;text-transform:uppercase;text-align:left;
+                             border-bottom:2px solid #e3e8f0;">Metric</th>
+                  <th style="padding:9px 14px;font-size:10px;font-weight:700;color:#8898aa;
+                             letter-spacing:.08em;text-transform:uppercase;text-align:right;
+                             border-bottom:2px solid #e3e8f0;">Your Value</th>
+                  <th style="padding:9px 14px;font-size:10px;font-weight:700;color:#0ecb81;
+                             letter-spacing:.08em;text-transform:uppercase;text-align:center;
+                             border-bottom:2px solid #e3e8f0;">Ideal Target</th>
+                  <th style="padding:9px 14px;font-size:10px;font-weight:700;color:#3b5af5;
+                             letter-spacing:.08em;text-transform:uppercase;text-align:center;
+                             border-bottom:2px solid #e3e8f0;">Benchmark</th>
+                  <th style="padding:9px 14px;font-size:10px;font-weight:700;color:#8898aa;
+                             letter-spacing:.08em;text-transform:uppercase;
+                             border-bottom:2px solid #e3e8f0;">Source</th>
+                  <th style="padding:9px 14px;font-size:10px;font-weight:700;color:#8898aa;
+                             letter-spacing:.08em;text-transform:uppercase;
+                             border-bottom:2px solid #e3e8f0;">Interpretation</th>
+                </tr>
+              </thead>
+              <tbody>{rows_html}</tbody>
+            </table>"""
+
+        def col(v, good, bad):
+            if isinstance(v, str): return "#1a1f36"
+            return "#0ecb81" if v >= good else ("#f6465d" if v <= bad else "#d97706")
+
+        m = metrics
+
+        # ════════════════════════════════════════════════════════════════
+        # CATEGORY 1 — PERFORMANCE METRICS
+        # ════════════════════════════════════════════════════════════════
+        st.markdown('''
+        <div style="display:flex;align-items:center;gap:10px;margin:10px 0 8px;">
+          <div style="font-size:13px;font-weight:800;color:#1a1f36;">📈 Performance Metrics</div>
+          <div style="font-size:11px;color:#8898aa;">Returns focus — how much you made vs risk taken</div>
+        </div>''', unsafe_allow_html=True)
+
+        perf_rows = (
+            mrow("Cumulative Return",
+                 f'{m["total_ret"]:+.2f}%',
+                 "> +15%/yr",
+                 "~36% (2025 avg)",
+                 "Crypto Fund Research 2025",
+                 "Total gain since first snapshot",
+                 col(m["total_ret"], 15, 0))
+            + mrow("CAGR (annualised)",
+                 f'{m["cagr"]:+.1f}%',
+                 "> +20%/yr",
+                 "~36%/yr",
+                 "Crypto HF avg 2025",
+                 "Compound annual growth rate",
+                 col(m["cagr"], 20, 0))
+            + mrow("Max Profit (peak)",
+                 f'{m["max_profit"]:+.2f}%',
+                 "> +10%",
+                 "—",
+                 "—",
+                 "Best gain from portfolio start",
+                 col(m["max_profit"], 10, 0))
+            + mrow("Best Snapshot",
+                 f'{m["best_snap"]:+.3f}%',
+                 "> 0%",
+                 "—",
+                 "—",
+                 "Largest single-interval gain",
+                 "#0ecb81" if m["best_snap"] > 0 else "#8898aa")
+            + mrow("Worst Snapshot",
+                 f'{m["worst_snap"]:+.3f}%',
+                 "> −0.5%",
+                 "—",
+                 "—",
+                 "Largest single-interval loss",
+                 "#f6465d" if m["worst_snap"] < -1 else "#d97706" if m["worst_snap"] < -0.5 else "#0ecb81")
+        )
+        st.markdown(mtable(perf_rows), unsafe_allow_html=True)
+
+        # ════════════════════════════════════════════════════════════════
+        # CATEGORY 2 — RISK METRICS
+        # ════════════════════════════════════════════════════════════════
+        st.markdown('''
+        <div style="display:flex;align-items:center;gap:10px;margin:18px 0 8px;">
+          <div style="font-size:13px;font-weight:800;color:#1a1f36;">🛡 Risk Metrics</div>
+          <div style="font-size:11px;color:#8898aa;">Volatility · drawdown · loss probability</div>
+        </div>''', unsafe_allow_html=True)
+
+        risk_rows = (
+            mrow("Sharpe Ratio",
+                 f'{m["sharpe"]:.3f}',
+                 "> 1.5",
+                 "1.6 (crypto HF avg)",
+                 "Crypto Fund Research 2025",
+                 "Return per unit of total risk",
+                 col(m["sharpe"], 1.5, 0.3))
+            + mrow("Sortino Ratio",
+                 f'{m["sortino"]:.3f}',
+                 "> 2.0",
+                 "2.03 (quant strategies)",
+                 "Crypto Fund Research 2025",
+                 "Return per unit of downside risk only",
+                 col(m["sortino"], 2.0, 0.5))
+            + mrow("Omega Ratio",
+                 f'{m["omega"]:.3f}' if m["omega"] != float("inf") else "∞",
+                 "> 1.5",
+                 "> 1.0 (profitable)",
+                 "Industry standard",
+                 "Gains-to-losses ratio (threshold = 0)",
+                 col(m["omega"], 1.5, 0.8) if m["omega"] != float("inf") else "#0ecb81")
+            + mrow("Calmar Ratio",
+                 f'{m["calmar"]:.3f}',
+                 "> 1.0",
+                 "1.0–3.0 (top hedge funds)",
+                 "FasterCapital / industry",
+                 "Annualised return / |Max Drawdown|",
+                 col(m["calmar"], 1.0, 0.3))
+            + mrow("Recovery Factor",
+                 f'{m["recovery"]:.3f}',
+                 "> 1.0",
+                 "> 1.0",
+                 "Industry standard",
+                 "How well returns offset drawdowns",
+                 col(m["recovery"], 1.0, 0.3))
+            + mrow("Annualised Volatility",
+                 f'{m["volatility"]:.1f}%',
+                 "< 50%",
+                 "~46% (crypto HF avg)",
+                 "Crypto Fund Research 2025",
+                 "Standard deviation of returns × √288",
+                 col(-m["volatility"], -50, -80))
+            + mrow("Max Drawdown",
+                 f'{m["max_drawdown"]:.2f}%',
+                 "> −20%",
+                 "−25% to −40% typical",
+                 "Bridgewater / crypto HFs",
+                 "Worst peak-to-trough decline",
+                 col(m["max_drawdown"], -10, -25))
+            + mrow("Current Drawdown",
+                 f'{m["current_dd"]:.2f}%',
+                 "> −5%",
+                 "—",
+                 "—",
+                 "Distance below most recent peak",
+                 col(m["current_dd"], -5, -15))
+            + mrow("Ulcer Index",
+                 f'{m["ulcer"]:.2f}%',
+                 "< 5%",
+                 "< 10%",
+                 "Industry standard",
+                 "RMS of drawdown — penalises deep/long DDs",
+                 col(-m["ulcer"], -5, -15))
+            + mrow("Longest Drawdown",
+                 f'{m["longest_dd_hrs"]:.1f}h',
+                 "< 24h",
+                 "—",
+                 "—",
+                 "Longest consecutive time below peak",
+                 col(-m["longest_dd_hrs"], -24, -168))
+            + mrow("VaR 95% (per snapshot)",
+                 f'{m["var95"]:.3f}%',
+                 "> −0.5%",
+                 "—",
+                 "—",
+                 "Worst expected loss 95% of the time",
+                 col(m["var95"], -0.5, -1.5))
+            + mrow("CVaR 95% (Exp. Shortfall)",
+                 f'{m["cvar95"]:.3f}%',
+                 "> −1.0%",
+                 "—",
+                 "—",
+                 "Average loss in the worst 5% of snapshots",
+                 col(m["cvar95"], -1.0, -2.5))
+        )
+        st.markdown(mtable(risk_rows), unsafe_allow_html=True)
+
+        # ════════════════════════════════════════════════════════════════
+        # CATEGORY 3 — BENCHMARK COMPARISON
+        # ════════════════════════════════════════════════════════════════
+        st.markdown('''
+        <div style="display:flex;align-items:center;gap:10px;margin:18px 0 8px;">
+          <div style="font-size:13px;font-weight:800;color:#1a1f36;">🏆 Benchmark Comparison</div>
+          <div style="font-size:11px;color:#8898aa;">How you compare to known benchmarks</div>
+        </div>''', unsafe_allow_html=True)
+
+        # Benchmark reference table (static — from research)
+        bench_html = """
+        <table style="width:100%;border-collapse:collapse;background:#fff;
+                      border:1px solid #e3e8f0;border-radius:10px;overflow:hidden;margin-bottom:14px;">
+          <thead>
+            <tr style="background:#f7f8fc;">
+              <th style="padding:9px 14px;font-size:10px;font-weight:700;color:#8898aa;letter-spacing:.08em;text-transform:uppercase;text-align:left;border-bottom:2px solid #e3e8f0;">Fund / Benchmark</th>
+              <th style="padding:9px 14px;font-size:10px;font-weight:700;color:#8898aa;letter-spacing:.08em;text-transform:uppercase;text-align:center;border-bottom:2px solid #e3e8f0;">Sharpe</th>
+              <th style="padding:9px 14px;font-size:10px;font-weight:700;color:#8898aa;letter-spacing:.08em;text-transform:uppercase;text-align:center;border-bottom:2px solid #e3e8f0;">Sortino</th>
+              <th style="padding:9px 14px;font-size:10px;font-weight:700;color:#8898aa;letter-spacing:.08em;text-transform:uppercase;text-align:center;border-bottom:2px solid #e3e8f0;">Calmar</th>
+              <th style="padding:9px 14px;font-size:10px;font-weight:700;color:#8898aa;letter-spacing:.08em;text-transform:uppercase;text-align:center;border-bottom:2px solid #e3e8f0;">Vol</th>
+              <th style="padding:9px 14px;font-size:10px;font-weight:700;color:#8898aa;letter-spacing:.08em;text-transform:uppercase;border-bottom:2px solid #e3e8f0;">Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="background:#eff6ff;">
+              <td style="padding:9px 14px;font-size:12px;font-weight:800;color:#3b5af5;border-bottom:1px solid #edf0f7;">Your Portfolio</td>
+              <td style="padding:9px 14px;font-size:13px;font-weight:700;color:#3b5af5;font-family:'JetBrains Mono',monospace;text-align:center;border-bottom:1px solid #edf0f7;">""" + f"{m['sharpe']:.2f}" + """</td>
+              <td style="padding:9px 14px;font-size:13px;font-weight:700;color:#3b5af5;font-family:'JetBrains Mono',monospace;text-align:center;border-bottom:1px solid #edf0f7;">""" + f"{m['sortino']:.2f}" + """</td>
+              <td style="padding:9px 14px;font-size:13px;font-weight:700;color:#3b5af5;font-family:'JetBrains Mono',monospace;text-align:center;border-bottom:1px solid #edf0f7;">""" + f"{m['calmar']:.2f}" + """</td>
+              <td style="padding:9px 14px;font-size:13px;font-weight:700;color:#3b5af5;font-family:'JetBrains Mono',monospace;text-align:center;border-bottom:1px solid #edf0f7;">""" + f"{m['volatility']:.0f}%" + """</td>
+              <td style="padding:9px 14px;font-size:11px;color:#8898aa;border-bottom:1px solid #edf0f7;">Live</td>
+            </tr>
+            <tr>
+              <td style="padding:9px 14px;font-size:12px;font-weight:600;color:#1a1f36;border-bottom:1px solid #edf0f7;">Crypto HF Average (2025)</td>
+              <td style="padding:9px 14px;font-size:12px;text-align:center;color:#1a1f36;border-bottom:1px solid #edf0f7;">1.60</td>
+              <td style="padding:9px 14px;font-size:12px;text-align:center;color:#1a1f36;border-bottom:1px solid #edf0f7;">2.03</td>
+              <td style="padding:9px 14px;font-size:12px;text-align:center;color:#1a1f36;border-bottom:1px solid #edf0f7;">—</td>
+              <td style="padding:9px 14px;font-size:12px;text-align:center;color:#1a1f36;border-bottom:1px solid #edf0f7;">46%</td>
+              <td style="padding:9px 14px;font-size:11px;color:#8898aa;border-bottom:1px solid #edf0f7;">Crypto Fund Research 2025</td>
+            </tr>
+            <tr>
+              <td style="padding:9px 14px;font-size:12px;font-weight:600;color:#1a1f36;border-bottom:1px solid #edf0f7;">Top Quant Crypto Strategies</td>
+              <td style="padding:9px 14px;font-size:12px;text-align:center;color:#1a1f36;border-bottom:1px solid #edf0f7;">1.58</td>
+              <td style="padding:9px 14px;font-size:12px;text-align:center;color:#1a1f36;border-bottom:1px solid #edf0f7;">2.03</td>
+              <td style="padding:9px 14px;font-size:12px;text-align:center;color:#1a1f36;border-bottom:1px solid #edf0f7;">—</td>
+              <td style="padding:9px 14px;font-size:12px;text-align:center;color:#1a1f36;border-bottom:1px solid #edf0f7;">—</td>
+              <td style="padding:9px 14px;font-size:11px;color:#8898aa;border-bottom:1px solid #edf0f7;">Quant backtests, Crypto Fund Research</td>
+            </tr>
+            <tr>
+              <td style="padding:9px 14px;font-size:12px;font-weight:600;color:#1a1f36;border-bottom:1px solid #edf0f7;">Renaissance Medallion (est.)</td>
+              <td style="padding:9px 14px;font-size:12px;text-align:center;color:#1a1f36;border-bottom:1px solid #edf0f7;">> 2.0</td>
+              <td style="padding:9px 14px;font-size:12px;text-align:center;color:#1a1f36;border-bottom:1px solid #edf0f7;">—</td>
+              <td style="padding:9px 14px;font-size:12px;text-align:center;color:#1a1f36;border-bottom:1px solid #edf0f7;">—</td>
+              <td style="padding:9px 14px;font-size:12px;text-align:center;color:#1a1f36;border-bottom:1px solid #edf0f7;">—</td>
+              <td style="padding:9px 14px;font-size:11px;color:#8898aa;border-bottom:1px solid #edf0f7;">Arca Labs / Nobel-level research</td>
+            </tr>
+            <tr>
+              <td style="padding:9px 14px;font-size:12px;font-weight:600;color:#1a1f36;border-bottom:1px solid #edf0f7;">S&P 500 (historical)</td>
+              <td style="padding:9px 14px;font-size:12px;text-align:center;color:#1a1f36;border-bottom:1px solid #edf0f7;">0.40</td>
+              <td style="padding:9px 14px;font-size:12px;text-align:center;color:#1a1f36;border-bottom:1px solid #edf0f7;">—</td>
+              <td style="padding:9px 14px;font-size:12px;text-align:center;color:#1a1f36;border-bottom:1px solid #edf0f7;">—</td>
+              <td style="padding:9px 14px;font-size:12px;text-align:center;color:#1a1f36;border-bottom:1px solid #edf0f7;">16%</td>
+              <td style="padding:9px 14px;font-size:11px;color:#8898aa;border-bottom:1px solid #edf0f7;">Arca Labs (1926–2024 record)</td>
+            </tr>
+            <tr>
+              <td style="padding:9px 14px;font-size:12px;font-weight:600;color:#1a1f36;">60/40 Portfolio (historical)</td>
+              <td style="padding:9px 14px;font-size:12px;text-align:center;color:#1a1f36;">0.50</td>
+              <td style="padding:9px 14px;font-size:12px;text-align:center;color:#1a1f36;">—</td>
+              <td style="padding:9px 14px;font-size:12px;text-align:center;color:#1a1f36;">—</td>
+              <td style="padding:9px 14px;font-size:12px;text-align:center;color:#1a1f36;">~12%</td>
+              <td style="padding:9px 14px;font-size:11px;color:#8898aa;">Arca Labs</td>
+            </tr>
+          </tbody>
+        </table>"""
+        st.markdown(bench_html, unsafe_allow_html=True)
 
         st.markdown(
-            '<div class="metric-row">'
-            + mc("Total Return",   f'{metrics["total_ret"]:+.2f}%',  "Since first snapshot", rt_c)
-            + mc("Max Profit",     f'{metrics["max_profit"]:+.2f}%', "Peak from start", "#0ecb81")
-            + mc("Max Drawdown",   f'{metrics["max_drawdown"]:.2f}%',"Peak-to-trough", dd_c)
-            + mc("Current DD",     f'{metrics["current_dd"]:.2f}%',  "From last peak",
-                 "#f6465d" if metrics["current_dd"]<-5 else "#8898aa")
-            + mc("Sharpe Ratio",   f'{metrics["sharpe"]:.3f}',       ">1.5 strong · <0 weak", sh_c)
-            + mc("Sortino Ratio",  f'{metrics["sortino"]:.3f}',      "Downside-adj Sharpe", "#8898aa")
-            + mc("Calmar Ratio",   f'{metrics["calmar"]:.3f}',       "Return / |Max DD|", "#8898aa")
-            + mc("Volatility",     f'{metrics["volatility"]:.1f}%',  "Annualised", vl_c)
-            + '</div>', unsafe_allow_html=True)
+            '<div style="font-size:10px;color:#aab0c0;margin-top:4px;">'
+            'Benchmark data from: Crypto Fund Research 2025, The Arca Labs (2026), '
+            'FasterCapital. Past performance does not guarantee future results. '
+            'Not financial advice.</div>', unsafe_allow_html=True)
 
     with st.expander("📋 Snapshot history", expanded=False):
         if hist_data:
